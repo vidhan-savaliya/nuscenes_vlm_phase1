@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# NuScenes dataset files & symlinks
+data/
+
+# Run outputs, logs, SLURM job artifacts
+outputs/
+
+# Testing cache & environments
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+venv/
+.venv/
+env/
+
+# Editor / IDE artifacts
+.vscode/
+.idea/
+*.swp
+*.swo

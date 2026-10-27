@@ -1,0 +1,149 @@
+# =============================================================================
+#  nuScenes VLM Phase 1 — Master Configuration
+# =============================================================================
+
+# ─────────────────────────────────────────────
+#  Dataset
+# ─────────────────────────────────────────────
+dataset:
+  # Root directory containing the nuScenes dataset folder structure.
+  # Expected layout:
+  #   <dataroot>/
+  #     v1.0-mini/       ← mini split metadata JSON files
+  #     v1.0-trainval/   ← trainval split metadata JSON files
+  #     samples/         ← image files organised by sensor channel
+  #     sweeps/          ← raw continuous sensor sweeps (not used in Phase 1)
+  # Tip: On cluster systems, store large datasets on /scratch (e.g. /scratch/m25csa031/nuscenes)
+  dataroot: "data/nuscenes"
+
+  # Dataset version to use: "v1.0-mini" or "v1.0-trainval"
+  version: "v1.0-mini"
+
+  # Camera channel for front-facing images.
+  camera_channel: "CAM_FRONT"
+
+  # Set to true to suppress nuScenes devkit progress bars.
+  verbose: false
+
+# ─────────────────────────────────────────────
+#  Scene / Sample Selection
+# ─────────────────────────────────────────────
+selection:
+  # ── Mini split (pipeline validation) ──────
+  mini:
+    # Total annotated samples to process from the mini split (404 is all samples).
+    max_samples: 404
+    # Random seed for reproducible sampling (null = no shuffle).
+    seed: 42
+
+  # ── Trainval split (research pilot) ───────
+  trainval:
+    # Maximum number of training scenes to select.
+    max_train_scenes: 50
+    # Maximum number of validation scenes to select.
+    max_val_scenes: 10
+    # Random seed for reproducible scene selection (null = no shuffle).
+    seed: 42
+    # If true, select one representative sample per scene (the keyframe
+    # nearest to the scene midpoint).  If false, use all annotated samples.
+    one_sample_per_scene: false
+
+  # ── Cross-split guard ──────────────────────
+  # NEVER allow frames from the same scene to appear in both train and val.
+  # This flag is enforced in scene_selector.py; do not set to false.
+  enforce_split_integrity: true
+
+# ─────────────────────────────────────────────
+#  Model
+# ─────────────────────────────────────────────
+model:
+  # Primary VLM: "qwen2_5_vl_3b" or "smolvlm2_2b"
+  name: "qwen2_5_vl_3b"
+
+  # HuggingFace model identifiers.
+  model_ids:
+    qwen2_5_vl_3b: "Qwen/Qwen2.5-VL-3B-Instruct"
+    smolvlm2_2b:   "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+  # Inference precision: "bfloat16" | "float16" | "float32"
+  # "bfloat16" is recommended for GPU; use "float32" for CPU.
+  dtype: "bfloat16"
+
+  # Maximum number of new tokens to generate per sample.
+  max_new_tokens: 512
+
+  # Generation reproducibility.
+  do_sample: false        # greedy decoding for determinism
+  temperature: 1.0        # ignored when do_sample=false
+  top_p: 1.0              # ignored when do_sample=false
+
+  # Device override.  Leave null to auto-detect (CUDA → CPU).
+  device: null
+
+  # Cache directory for downloaded model weights.
+  # Placed on /scratch to utilise available high-capacity storage.
+  cache_dir: "/scratch/m25csa031/.cache/huggingface"
+
+# ─────────────────────────────────────────────
+#  Inference
+# ─────────────────────────────────────────────
+inference:
+  # Path to the prompt text file relative to the project root.
+  prompt_file: "configs/prompt.txt"
+
+  # Batch size.  Use 1 unless your GPU has sufficient VRAM.
+  batch_size: 1
+
+  # Save a checkpoint after every N samples.
+  checkpoint_interval: 10
+
+# ─────────────────────────────────────────────
+#  Output Paths
+# ─────────────────────────────────────────────
+outputs:
+  # Root output directory (relative to project root).
+  root: "outputs"
+
+  # Sub-directories (relative to root).
+  manifests:   "manifests"
+  predictions: "predictions"
+  metrics:     "metrics"
+  reports:     "reports"
+
+# ─────────────────────────────────────────────
+#  Evaluation
+# ─────────────────────────────────────────────
+evaluation:
+  # Visibility level thresholds defined by nuScenes (0-4).
+  # 0 = fully occluded, 4 = fully visible.
+  min_visibility_level: 1  # include all annotated objects
+
+  # Maximum reprojection distance (metres) for projecting 3D boxes
+  # onto the image plane (used only for visible-object matching).
+  max_projection_depth_m: 50.0
+
+  # Object categories to focus on for recall evaluation.
+  focus_categories:
+    - "vehicle.car"
+    - "vehicle.truck"
+    - "vehicle.bus.bendy"
+    - "vehicle.bus.rigid"
+    - "vehicle.bicycle"
+    - "vehicle.motorcycle"
+    - "human.pedestrian.adult"
+    - "human.pedestrian.child"
+    - "human.pedestrian.construction_worker"
+    - "human.pedestrian.police_officer"
+    - "movable_object.barrier"
+    - "movable_object.trafficcone"
+
+  # Number of samples to flag for manual hallucination review.
+  hallucination_review_n: 20
+
+# ─────────────────────────────────────────────
+#  Logging
+# ─────────────────────────────────────────────
+logging:
+  level: "INFO"   # DEBUG | INFO | WARNING | ERROR
+  log_to_file: true
+  log_file: "outputs/phase1.log"
