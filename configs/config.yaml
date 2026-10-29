@@ -85,6 +85,51 @@ model:
   cache_dir: "/scratch/m25csa031/.cache/huggingface"
 
 # ─────────────────────────────────────────────
+#  E2C-VLM Phase 1: Causal Token Pruning
+# ─────────────────────────────────────────────
+causal_pruning:
+  # Enable causality-aware visual token pruning (Stage 1 contribution)
+  enabled: false
+
+  # Pruning method:
+  #   - "causal"          : E2C-VLM Pearl do-calculus SCM graph surgery (Eq. 1)
+  #   - "fastv_attention" : FastV attention/norm heuristic baseline
+  #   - "similarity"      : LLaVA-PruMerge cosine similarity baseline
+  #   - "random"          : Random pruning ablation baseline
+  #   - "none"            : Unpruned baseline (100% visual tokens kept)
+  method: "causal"
+
+  # Target fraction of visual tokens to prune (e.g. 0.5 = 50% pruning)
+  pruning_ratio: 0.5
+
+  # Optional causal importance score threshold: tokens with J(v_i) < epsilon pruned
+  # If null, top-(1 - pruning_ratio) fraction of tokens are kept.
+  threshold_epsilon: null
+
+  # Interventional approximation mode:
+  #   - "group"    : Spatial super-token / patch group SCM graph surgery (fast batched)
+  #   - "taylor"   : First-order interventional Taylor gradient approximation
+  #   - "amortized": Amortized causal scoring proxy
+  intervention_mode: "group"
+
+  # Spatial group size (tokens per super-token group during graph surgery)
+  group_size: 16
+
+  # Counterfactual baseline token replacement:
+  #   - "mean"     : Spatial centroid visual token across current frame
+  #   - "zero"     : Zero vector
+  #   - "gaussian" : Stochastic Gaussian null baseline
+  null_token_mode: "mean"
+
+  # Safety guard: minimum visual tokens guaranteed to be preserved
+  keep_minimum: 16
+
+  # Masking strategy:
+  #   - true : in-place null token replacement (preserves 3D RoPE spatial geometry)
+  #   - false: sequence reduction
+  mask_in_place: true
+
+# ─────────────────────────────────────────────
 #  Inference
 # ─────────────────────────────────────────────
 inference:

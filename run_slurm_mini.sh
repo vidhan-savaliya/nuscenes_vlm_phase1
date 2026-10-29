@@ -31,18 +31,21 @@ cd /csehome/m25csa031/nuscenes_vlm_phase1
 
 export HF_HOME=/scratch/m25csa031/.cache/huggingface
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
 
 # Display GPU status
 nvidia-smi
 
+PYTHON_BIN="/csehome/m25csa031/miniconda3/envs/vit/bin/python"
+
 echo "=== Step 1: Run Inference on v1.0-mini (Qwen2.5-VL-3B) ==="
-python src/infer.py \
+$PYTHON_BIN src/infer.py \
     --config configs/config.yaml \
     --version v1.0-mini \
     --model qwen2_5_vl_3b
 
 echo "=== Step 2: Run Evaluation on Predictions ==="
-python src/evaluation.py \
+$PYTHON_BIN src/evaluation.py \
     --config configs/config.yaml \
     --predictions outputs/predictions/predictions_v1.0-mini_qwen2_5_vl_3b.jsonl
 

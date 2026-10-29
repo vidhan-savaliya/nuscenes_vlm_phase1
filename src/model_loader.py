@@ -32,6 +32,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from causal_pruner import CausalTokenPruner
+from causal_vlm import CausalVLMWrapper
+
 logger = logging.getLogger(__name__)
 
 # Mapping of friendly model keys to HuggingFace model IDs
@@ -120,9 +123,25 @@ class ModelLoader:
         self.device: str = _detect_device(model_cfg.get("device"))
         self.cache_dir: Optional[str] = model_cfg.get("cache_dir")
 
+        # Causal Token Pruning configuration (E2C-VLM Stage 1)
+        causal_cfg = cfg.get("causal_pruning", {})
+        self.causal_enabled: bool = bool(causal_cfg.get("enabled", False))
+        self.causal_method: str = str(causal_cfg.get("method", "causal")).lower()
+        self.pruning_ratio: float = float(causal_cfg.get("pruning_ratio", 0.5))
+        self.threshold_epsilon: Optional[float] = causal_cfg.get("threshold_epsilon")
+        if self.threshold_epsilon is not None:
+            self.threshold_epsilon = float(self.threshold_epsilon)
+        self.intervention_mode: str = str(causal_cfg.get("intervention_mode", "group"))
+        self.group_size: int = int(causal_cfg.get("group_size", 16))
+        self.null_token_mode: str = str(causal_cfg.get("null_token_mode", "mean"))
+        self.keep_minimum: int = int(causal_cfg.get("keep_minimum", 16))
+        self.mask_in_place: bool = bool(causal_cfg.get("mask_in_place", True))
+
         # Internal state
         self._model = None
         self._processor = None
+        self._pruner: Optional[CausalTokenPruner] = None
+        self._causal_wrapper: Optional[CausalVLMWrapper] = None
         self._load_time_sec: float = 0.0
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -198,6 +217,8 @@ class ModelLoader:
             self._model = self._model.to(self.device)
         self._model.eval()
 
+        self._setup_causal_pruning()
+
         processor_kwargs = {}
         if self.cache_dir:
             processor_kwargs["cache_dir"] = self.cache_dir
@@ -226,8 +247,41 @@ class ModelLoader:
             self._model = self._model.to(self.device)
         self._model.eval()
 
+        self._setup_causal_pruning()
+
+    def _setup_causal_pruning(self) -> None:
+        """Initialize CausalTokenPruner and wrap model if causal pruning is enabled."""
+        if self.causal_enabled and self.causal_method != "none" and self.pruning_ratio > 0.0:
+            logger.info(
+                "Initializing E2C-VLM CausalTokenPruner (method=%s, ratio=%.2f, mode=%s, group_size=%d) …",
+                self.causal_method,
+                self.pruning_ratio,
+                self.intervention_mode,
+                self.group_size,
+            )
+            self._pruner = CausalTokenPruner(
+                method=self.causal_method,
+                pruning_ratio=self.pruning_ratio,
+                threshold_epsilon=self.threshold_epsilon,
+                intervention_mode=self.intervention_mode,
+                group_size=self.group_size,
+                null_token_mode=self.null_token_mode,
+                keep_minimum=self.keep_minimum,
+                mask_in_place=self.mask_in_place,
+            )
+            self._causal_wrapper = CausalVLMWrapper(
+                self._model,
+                pruner=self._pruner,
+                model_key=self.model_key,
+            )
+            self._model = self._causal_wrapper
+
     def unload(self) -> None:
         """Delete model from memory and free GPU cache."""
+        if self._causal_wrapper is not None:
+            self._causal_wrapper.remove_hook()
+            self._causal_wrapper = None
+        self._pruner = None
         self._model = None
         self._processor = None
         try:
@@ -343,6 +397,19 @@ class ModelLoader:
         )[0]
         n_tokens = trimmed[0].shape[0]
 
+        pruning_res = getattr(self._causal_wrapper, "last_pruning_result", None) if self._causal_wrapper else None
+        causal_meta = {
+            "enabled": self.causal_enabled,
+            "method": self.causal_method,
+            "pruning_ratio": self.pruning_ratio,
+            "original_visual_tokens": pruning_res.original_count if pruning_res else None,
+            "retained_visual_tokens": pruning_res.retained_count if pruning_res else None,
+            "pruned_visual_tokens": pruning_res.pruned_count if pruning_res else None,
+            "compression_ratio": pruning_res.compression_ratio if pruning_res else 0.0,
+            "pruning_latency_sec": pruning_res.pruning_latency_sec if pruning_res else 0.0,
+            "mean_causal_score": pruning_res.diagnostics.get("mean_causal_score") if pruning_res else None,
+        }
+
         return {
             "text": output_text,
             "n_tokens": int(n_tokens),
@@ -350,6 +417,7 @@ class ModelLoader:
             "device": str(target_device),
             "dtype": self.dtype_str,
             "error": None,
+            "causal_pruning": causal_meta,
         }
 
     def _generate_smolvlm(self, image, prompt: str) -> Dict[str, Any]:
@@ -394,6 +462,19 @@ class ModelLoader:
         output_text = self._processor.decode(trimmed[0], skip_special_tokens=True)
         n_tokens = trimmed.shape[1]
 
+        pruning_res = getattr(self._causal_wrapper, "last_pruning_result", None) if self._causal_wrapper else None
+        causal_meta = {
+            "enabled": self.causal_enabled,
+            "method": self.causal_method,
+            "pruning_ratio": self.pruning_ratio,
+            "original_visual_tokens": pruning_res.original_count if pruning_res else None,
+            "retained_visual_tokens": pruning_res.retained_count if pruning_res else None,
+            "pruned_visual_tokens": pruning_res.pruned_count if pruning_res else None,
+            "compression_ratio": pruning_res.compression_ratio if pruning_res else 0.0,
+            "pruning_latency_sec": pruning_res.pruning_latency_sec if pruning_res else 0.0,
+            "mean_causal_score": pruning_res.diagnostics.get("mean_causal_score") if pruning_res else None,
+        }
+
         return {
             "text": output_text,
             "n_tokens": int(n_tokens),
@@ -401,6 +482,7 @@ class ModelLoader:
             "device": str(target_device),
             "dtype": self.dtype_str,
             "error": None,
+            "causal_pruning": causal_meta,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -446,4 +528,15 @@ class ModelLoader:
             "device": self.device,
             "dtype": self.dtype_str,
             "error": message,
+            "causal_pruning": {
+                "enabled": self.causal_enabled,
+                "method": self.causal_method,
+                "pruning_ratio": self.pruning_ratio,
+                "original_visual_tokens": None,
+                "retained_visual_tokens": None,
+                "pruned_visual_tokens": None,
+                "compression_ratio": 0.0,
+                "pruning_latency_sec": 0.0,
+                "mean_causal_score": None,
+            },
         }

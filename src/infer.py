@@ -121,6 +121,8 @@ def build_prediction_record(
         "dtype": result.get("dtype", "unknown"),
         # Error field
         "error": result.get("error"),
+        # Causal Token Pruning metadata (E2C-VLM Stage 1)
+        "causal_pruning": result.get("causal_pruning", {}),
         # Wall-clock timestamp of this record
         "recorded_at": datetime.datetime.utcnow().isoformat() + "Z",
     }
@@ -302,6 +304,43 @@ def main(argv: Optional[List[str]] = None) -> None:
         default="both",
         help="Which trainval split to process (ignored for mini).",
     )
+    # E2C-VLM Causal Token Pruning CLI arguments
+    parser.add_argument(
+        "--causal-pruning",
+        action="store_true",
+        default=None,
+        help="Enable causality-grounded token pruning (E2C-VLM Stage 1).",
+    )
+    parser.add_argument(
+        "--no-causal-pruning",
+        action="store_true",
+        help="Explicitly disable causal token pruning.",
+    )
+    parser.add_argument(
+        "--pruning-method",
+        choices=["causal", "fastv_attention", "similarity", "random", "none"],
+        help="Pruning method ('causal' Eq. 1, 'fastv_attention', 'similarity', 'random', 'none').",
+    )
+    parser.add_argument(
+        "--pruning-ratio",
+        type=float,
+        help="Fraction of visual tokens to prune (e.g. 0.3, 0.5, 0.7).",
+    )
+    parser.add_argument(
+        "--intervention-mode",
+        choices=["group", "taylor", "amortized"],
+        help="SCM interventional distribution approximation mode ('group', 'taylor', 'amortized').",
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        help="Group size for spatial super-token SCM surgery.",
+    )
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        help="Causal score threshold epsilon for filtering J(v_i) < epsilon.",
+    )
     args = parser.parse_args(argv)
 
     # ── Load configuration ─────────────────────────────────────────────────
@@ -320,6 +359,25 @@ def main(argv: Optional[List[str]] = None) -> None:
         cfg["dataset"]["version"] = args.version
     if args.model:
         cfg["model"]["name"] = args.model
+
+    # Causal pruning overrides
+    causal_cfg = cfg.setdefault("causal_pruning", {})
+    if args.causal_pruning is not None:
+        causal_cfg["enabled"] = True
+    if args.no_causal_pruning:
+        causal_cfg["enabled"] = False
+    if args.pruning_method:
+        causal_cfg["method"] = args.pruning_method
+        if args.pruning_method != "none":
+            causal_cfg["enabled"] = True
+    if args.pruning_ratio is not None:
+        causal_cfg["pruning_ratio"] = args.pruning_ratio
+    if args.intervention_mode:
+        causal_cfg["intervention_mode"] = args.intervention_mode
+    if args.group_size is not None:
+        causal_cfg["group_size"] = args.group_size
+    if args.epsilon is not None:
+        causal_cfg["threshold_epsilon"] = args.epsilon
 
     version = cfg["dataset"]["version"]
     seed = cfg["selection"].get("mini", {}).get("seed", 42)
@@ -343,6 +401,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     all_stats: List[Dict[str, Any]] = []
 
+    # Tag output filename when causal pruning is active
+    prune_tag = ""
+    if model.causal_enabled and model.causal_method != "none" and model.pruning_ratio > 0.0:
+        prune_tag = f"_{model.causal_method}_p{int(round(model.pruning_ratio * 100))}"
+
     # ── Run inference ──────────────────────────────────────────────────────
     if "mini" in version:
         sel_cfg = cfg["selection"]["mini"]
@@ -353,7 +416,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         )
         output_path = resolve_output_path(
             cfg, "predictions",
-            f"predictions_{version}_{model.model_key}.jsonl",
+            f"predictions_{version}_{model.model_key}{prune_tag}.jsonl",
         )
         stats = run_inference_on_samples(
             samples=samples,
@@ -382,7 +445,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         if run_splits in ("train", "both") and train_samples:
             out_train = resolve_output_path(
                 cfg, "predictions",
-                f"predictions_{version}_train_{model.model_key}.jsonl",
+                f"predictions_{version}_train_{model.model_key}{prune_tag}.jsonl",
             )
             stats_train = run_inference_on_samples(
                 samples=train_samples,
@@ -399,7 +462,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         if run_splits in ("val", "both") and val_samples:
             out_val = resolve_output_path(
                 cfg, "predictions",
-                f"predictions_{version}_val_{model.model_key}.jsonl",
+                f"predictions_{version}_val_{model.model_key}{prune_tag}.jsonl",
             )
             stats_val = run_inference_on_samples(
                 samples=val_samples,

@@ -231,6 +231,7 @@ def evaluate_sample(
         "tokens_per_sec": prediction.get("tokens_per_sec", 0.0),
         "device": prediction.get("device", ""),
         "dtype": prediction.get("dtype", ""),
+        "causal_pruning": prediction.get("causal_pruning", {}),
     }
 
 
@@ -306,6 +307,35 @@ def aggregate_metrics(
 
     first_latency = latencies[0] if latencies else 0.0
 
+    # ── Causal Compression Metrics (E2C-VLM Stage 1) ─────────────
+    causal_entries = [r.get("causal_pruning", {}) for r in evaluated if r.get("causal_pruning")]
+    if causal_entries and any(e.get("enabled") for e in causal_entries):
+        ratios = [
+            e.get("compression_ratio")
+            if (e.get("compression_ratio") or 0.0) > 0.0
+            else e.get("pruning_ratio", 0.0)
+            for e in causal_entries
+            if e.get("compression_ratio") is not None or e.get("pruning_ratio") is not None
+        ]
+        orig_tokens = [e.get("original_visual_tokens") for e in causal_entries if e.get("original_visual_tokens")]
+        retained_tokens = [e.get("retained_visual_tokens") for e in causal_entries if e.get("retained_visual_tokens")]
+        prune_latencies = [e.get("pruning_latency_sec", 0.0) for e in causal_entries if e.get("pruning_latency_sec") is not None]
+        methods = list({e.get("method") for e in causal_entries if e.get("method")})
+
+        compression_summary = {
+            "causal_pruning_enabled": True,
+            "pruning_methods": methods,
+            "mean_compression_ratio": safe_divide(sum(ratios), len(ratios)),
+            "mean_original_visual_tokens": safe_divide(sum(orig_tokens), len(orig_tokens)) if orig_tokens else 0,
+            "mean_retained_visual_tokens": safe_divide(sum(retained_tokens), len(retained_tokens)) if retained_tokens else 0,
+            "mean_pruning_latency_sec": safe_divide(sum(prune_latencies), len(prune_latencies)) if prune_latencies else 0.0,
+        }
+    else:
+        compression_summary = {
+            "causal_pruning_enabled": False,
+            "mean_compression_ratio": 0.0,
+        }
+
     return {
         # Counts
         "n_total": len(per_sample_results),
@@ -332,6 +362,8 @@ def aggregate_metrics(
         "p90_latency_sec": percentile(latencies, 90),
         "p95_latency_sec": percentile(latencies, 95),
         "mean_tokens_per_sec": safe_divide(sum(tokens_per_sec), len(tokens_per_sec)),
+        # Causal Compression
+        "compression_metrics": compression_summary,
         # Caveats
         "evaluation_notes": [
             "Recall is estimated using keyword matching; it may over- or under-count.",
@@ -357,7 +389,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     parser.add_argument(
         "--predictions",
-        required=True,
         help="Path to the JSONL predictions file.",
     )
     parser.add_argument(
@@ -369,7 +400,19 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--output-metrics",
         help="Override output metrics file path.",
     )
+    parser.add_argument(
+        "--compare",
+        nargs="+",
+        help="Paths to multiple metrics JSON files to produce a comparison table.",
+    )
     args = parser.parse_args(argv)
+
+    if args.compare:
+        print_comparison_report(args.compare)
+        return
+
+    if not args.predictions:
+        parser.error("--predictions is required unless using --compare.")
 
     cfg = load_config(args.config)
     log_cfg = cfg.get("logging", {})
@@ -455,11 +498,69 @@ def main(argv: Optional[List[str]] = None) -> None:
     logger.info("P90 latency                  : %.2f s", metrics["p90_latency_sec"])
     logger.info("P95 latency                  : %.2f s", metrics["p95_latency_sec"])
     logger.info("Mean tokens / sec            : %.1f", metrics["mean_tokens_per_sec"])
+    if metrics["compression_metrics"].get("causal_pruning_enabled"):
+        cm = metrics["compression_metrics"]
+        logger.info(
+            "Causal Token Pruning         : %s (%.1f%% tokens pruned)",
+            ", ".join(cm.get("pruning_methods", ["unknown"])),
+            cm.get("mean_compression_ratio", 0.0) * 100.0,
+        )
+        logger.info(
+            "Visual Tokens (orig->kept)   : %.1f -> %.1f",
+            cm.get("mean_original_visual_tokens", 0),
+            cm.get("mean_retained_visual_tokens", 0),
+        )
     logger.info(sep)
     logger.info("NOTES:")
     for note in metrics.get("evaluation_notes", []):
         logger.info("  • %s", note)
     logger.info(sep)
+
+
+def print_comparison_report(metrics_paths: List[str]) -> None:
+    """Load multiple metrics JSON files and print a comparative markdown table."""
+    records = []
+    for p in metrics_paths:
+        path = Path(p)
+        if not path.is_file():
+            print(f"File not found: {path}")
+            continue
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            data["_filename"] = path.stem
+            records.append(data)
+
+    if not records:
+        print("No valid metrics files loaded.")
+        return
+
+    print("\n" + "=" * 90)
+    print("E2C-VLM STAGE 1: CAUSAL TOKEN PRUNING COMPARATIVE BENCHMARK")
+    print("=" * 90)
+    header = (
+        f"{'Experiment':<35} | {'Recall (Focus)':<14} | {'Recall (RU)':<12} | "
+        f"{'Unsupported':<12} | {'Tokens Pruned':<14} | {'Latency':<10}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for r in records:
+        raw_name = r.get("_filename", "unknown")
+        clean_name = raw_name.replace("metrics_predictions_v1.0-mini_", "").replace("predictions_v1.0-mini_", "")
+        if clean_name == "qwen2_5_vl_3b":
+            clean_name = "baseline (unpruned)"
+        focus_rec = r.get("mean_recall_focus_categories", 0.0)
+        ru_rec = r.get("mean_recall_road_users", 0.0)
+        unsupp = r.get("mean_unsupported_mentions_per_sample", 0.0)
+        comp_info = r.get("compression_metrics", {})
+        comp = comp_info.get("mean_compression_ratio", 0.0) * 100.0
+        lat = r.get("mean_latency_sec", 0.0)
+
+        print(
+            f"{clean_name:<35} | {focus_rec:<14.3f} | {ru_rec:<12.3f} | "
+            f"{unsupp:<12.2f} | {comp:<13.1f}% | {lat:<9.2f}s"
+        )
+    print("=" * 90 + "\n")
 
 
 if __name__ == "__main__":
